@@ -44,6 +44,7 @@ class BlockController extends \Concrete\Core\Controller\AbstractController
     protected $btCacheBlockOutputLifetime = 0;
     protected $btCacheBlockOutputOnPost = false;
     protected $btCacheBlockOutputForRegisteredUsers = false;
+    protected $btCacheBlockOutputClearOnEvents  = array();
     protected $bActionCID;
     protected $btExportPageColumns = array();
     protected $btExportFileColumns = array();
@@ -239,6 +240,11 @@ class BlockController extends \Concrete\Core\Controller\AbstractController
             }
         }
         $this->set('controller', $this);
+    }
+
+    public function on_start()
+    {
+        $this->setupClearCacheEvents();
     }
 
     /**
@@ -764,5 +770,62 @@ class BlockController extends \Concrete\Core\Controller\AbstractController
     public function getJavaScriptStrings()
     {
         return array();
+    }
+
+    protected function setupClearCacheEvents()
+    {
+        foreach ($this->btCacheBlockOutputClearOnEvents as $evtName) {
+            \Events::addListener($evtName, array($this, 'clearCache'));
+        }
+    }
+    
+    public final function clearCache()
+    {
+        $cache = Core::make('cache');
+        $db = DB::connection();
+        $sm = $db->getSchemaManager();
+        $bt = $this->getBlockObject();
+
+        $pageCache = \PageCache::getLibrary();
+        if (is_object($pageCache)) {
+            $qb    = $db->createQueryBuilder();
+            $cIDs  = $qb->select('cvb.cID')->from('CollectionVersionBlocksOutputCache', 'cvb')
+                    ->innerJoin('cvb', 'Blocks', 'b', 'b.bID = cvb.bID')
+                    ->where($qb->expr()->eq('b.btID', ':btID'))
+                    ->setParameter(':btID',  $bt->getBlockTypeID())
+                    ->execute()->fetchAll();
+            foreach ($cIDs as $cID) {
+                $pageCache->purge(\Concrete\Core\Page\Page::getByID($cID));
+            }
+        }
+        
+        $cache->delete('blockTypeByID/' . $bt->getBlockTypeID());
+        $cache->delete('blockTypeByHandle/' . $bt->getBlockTypeHandle());
+
+        $blocksTable = $sm->listTableDetails('Blocks');
+        if ($blocksTable->hasColumn('btCachedBlockRecord')) {
+            $qb = $db->createQueryBuilder();
+            $qb->update('Blocks')->set('btCachedBlockRecord', 'null')
+                ->where($qb->expr()->eq('btID', ':btID'))
+                ->setParameter(':btID', $bt->getBlockTypeID())
+                ->execute();
+        }
+
+        if ($sm->tablesExist(array('CollectionVersionBlocksOutputCache'))) {
+            $qb = $db->createQueryBuilder();
+            $subQb = $db->createQueryBuilder();
+            $qb->delete('CollectionVersionBlocksOutputCache')
+                ->where($qb->expr()->comparison('bID', 'IN', '('.
+                    $subQb->select('b.bID')->from('Blocks','b')
+                          ->where($subQb->expr()->eq('b.btID', ':btID'))
+                          ->getSQL() .')'))
+                ->setParameter(':btID', $bt->getBlockTypeID())
+                ->execute();
+        }
+
+        $cache->delete('blockTypeList');
+
+        // Clear precompiled script bytecode caches
+        OpCache::clear(); // Should be in a better place
     }
 }
